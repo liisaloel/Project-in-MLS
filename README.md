@@ -14,3 +14,6 @@ This repository contains the resources for analyzing breast cancer scRNA-seq and
 - For Xenium ISS data handling and scRNA-seq projections, refer to the script in the ISS folder.
 - For various LDA applications, refer to the scripts in the LDA folder: LDA_17.rmd for cell type annotations for 17 cell types; 
 - 
+
+## References
+Janesick A, Shelansky R, Gottscho AD, Wagner F, Williams SR, Rouault M, et al. High resolution mapping of the tumor microenvironment using integrated single-cell, spatial and in situ analysis. Nat Commun. 2023;14(1). 
