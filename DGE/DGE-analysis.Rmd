@@ -1,0 +1,693 @@
+---
+title: "Differential Gene Expression (DGE) analysis"
+output: html_notebook
+---
+
+### Load libraries
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(gprofiler2)
+library(sctransform)
+library(magrittr)
+library(umap)
+library(stats)
+library(pals)
+library(EnhancedVolcano)
+library(future)
+library(MASS)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+```
+
+### Define color palettes for plotting
+
+```{r}
+colors <- pals::glasbey(20)
+sequential_ <- pals::cividis(100)
+```
+
+### Load ISS data
+
+The ISS spatial data can be found in the metadata folder: https://drive.google.com/drive/folders/1XHkZ_wsk9y_LQwP4ydhZ5cj7kCtyat9v?usp=drive_link
+
+```{r}
+neighborhoods_matrix_10_cells <- load(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/DGE/data/neighborhoods_matrix_10_cells.Rdata")
+```
+
+```{r}
+ISS_matrix <- readMM("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/matrix.mtx")
+```
+
+```{r}
+features <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/features.tsv", sep="\t", header=FALSE, stringsAsFactors=FALSE)
+
+barcodes <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/barcodes.tsv", header=FALSE, stringsAsFactors=FALSE)
+
+metadata <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/Fig3e-j_Xenium.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+```
+
+Assign barcodes and genes as names for the ISS matrix.
+
+```{r}
+colnames(features) <- c("ensembl","gene","gene_expression")
+rownames(ISS_matrix) <- features$gene
+colnames(ISS_matrix) <- barcodes$V1  
+```
+
+
+### Some filtering before LDA
+
+First, filter the features.
+
+```{r}
+features <- filter(features, gene_expression == "Gene Expression")
+```
+
+Filter count matrix based on the filtered features.
+
+```{r}
+genes_list <- features$gene
+
+ISS_matrix_filtered <- ISS_matrix[genes_list, ]
+```
+
+Create a separate column for cell barcodes to keep track of them; remove unlabeled cells.
+
+```{r}
+metadata$barcodes <- rownames(metadata)
+metadata <- metadata[metadata$Cluster != "Unlabeled", ]
+```
+
+Filter and keep cells in metadata and matrix that are present in both.
+
+```{r}
+ISS_barcodes <- intersect(metadata$barcodes, colnames(ISS_matrix_filtered))
+ISS_matrix_filtered <- ISS_matrix_filtered[, ISS_barcodes]
+metadata <- metadata[metadata$barcodes %in% ISS_barcodes, ]
+```
+
+### Load scRNA-seq data
+
+```{r}
+sc_matrix <- readMM("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/matrix.mtx")
+
+sc_features <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/features.tsv", sep="\t", header=FALSE, stringsAsFactors=FALSE)
+
+sc_barcodes <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/barcodes.tsv", header=FALSE, stringsAsFactors=FALSE)
+```
+
+```{r}
+sc_metadata <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/Fig2a_scFFPE-seq_UMAP.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+```
+
+
+
+```{r}
+# Set names for rows and cols
+rownames(sc_matrix) <- sc_features$V2  # gene symbols as row names
+colnames(sc_matrix) <- sc_barcodes$V1  # barcodes as column names
+```
+
+Find matching barcodes between count matrix and metadata and filter them.
+
+```{r}
+sc_barcodes <- intersect(rownames(sc_metadata), colnames(sc_matrix))
+```
+
+```{r}
+sc_metadata_subset <- sc_metadata[sc_barcodes,]
+sc_matrix_filt <- sc_matrix[,sc_barcodes]
+```
+
+
+### Single-cell: Filter for invasive tumor cells
+
+```{r}
+invasive_cells_sc <- rownames(sc_metadata_subset)[sc_metadata_subset$Annotation == "Invasive_Tumor"]
+prolif_invasive_cells_sc <- rownames(sc_metadata_subset)[sc_metadata_subset$Annotation == "Prolif_Invasive_Tumor"]
+```
+
+```{r}
+sc_invasive_matrix <- sc_matrix_filt[,c(invasive_cells_sc, prolif_invasive_cells_sc)]
+```
+
+### Normalization 
+
+1. RPM Normalization
+
+log(count / total count per cell) * (median total count + 1)
+
+```{r}
+sc_total_counts <- colSums(sc_invasive_matrix)
+scaling_factor <- median(sc_total_counts)
+RPM_norm <- t(t(sc_invasive_matrix) / sc_total_counts) * scaling_factor
+
+# log transformation
+RPM_norm <- log2(RPM_norm + 1)
+```
+
+2. SCTransform
+
+```{r}
+options(future.globals.maxSize = 1600 * 1024^2)  
+
+# Set a new plan
+plan(multisession, workers = 4) 
+```
+
+```{r}
+SCT_norm <- sctransform::vst(as.matrix(sc_invasive_matrix))$y
+```
+
+### Filter genes (match ISS and scRNA-seq features)
+
+```{r}
+matching_genes <- intersect(genes_list, rownames(SCT_norm))
+SCT_norm_filt <- SCT_norm[matching_genes,]
+RPM_norm_filt <- RPM_norm[matching_genes,]
+ISS_matrix_filtered <- ISS_matrix_filtered[matching_genes,]
+```
+
+```{r}
+SCT_norm_filt <- t(SCT_norm_filt)
+RPM_norm_filt <- t(RPM_norm_filt)
+```
+
+
+### ISS: Filter for invasive tumor cells
+
+Find invasive tumor cells that have:
+
+1) more or equal to 90% invasive tumor cells as neighbors
+2) less or equal to 40% - can be considered as non-tumor neighborhood
+
+Problems:
+
+1) If I include proliferative invasive tumor cells as well - overlaps between 'non-tumor' and 'tumor' cells.
+2) There are no 'tumor' prolif. cells.
+
+Solution: Prioritize tumor as the label for these cells.
+
+```{r}
+total_neighbors <- colSums(neighborhoods_matrix_number_filt)
+proportion_invasive <- neighborhoods_matrix_number_filt["Invasive_Tumor", ] / total_neighbors
+proportion_prolif <- neighborhoods_matrix_number_filt["Prolif_Invasive_Tumor", ] / total_neighbors
+
+invasive_90_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_invasive >= 0.9]
+prolif_90_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_prolif >= 0.9]
+
+invasive_40_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_invasive <= 0.4]
+prolif_40_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_prolif <= 0.4]
+```
+
+To avoid duplicates in the filtered count matrix, keep unique barcodes.
+
+```{r}
+combined_barcodes <- unique(c(invasive_90_barcodes, prolif_90_barcodes, invasive_40_barcodes, prolif_40_barcodes))
+
+invasive_tumor_matrix <- ISS_matrix_filtered[, combined_barcodes]
+```
+
+
+```{r}
+inv_tumor_matrix <- t(as.matrix(invasive_tumor_matrix))
+```
+
+
+### Normalization 
+
+## Method 1: log2(x+1) normalization 
+
+```{r}
+LOG_ISS_matrix <- log2(inv_tumor_matrix+1)
+```
+
+## Method 2: SCTransform
+
+```{r}
+SCT_ISS_matrix <- sctransform::vst(t(inv_tumor_matrix))$y
+```
+
+```{r}
+SCT_ISS_matrix <- t(SCT_ISS_matrix)
+```
+
+
+### Refilter genes for ISS and scRNA-seq (some are not used during scRNA-seq SCT)
+
+```{r}
+matching_genes_2 <- intersect(colnames(SCT_norm_filt), colnames(SCT_ISS_matrix))
+
+SCT_ISS_matrix_filt <- SCT_ISS_matrix[,matching_genes_2]
+LOG_ISS_matrix_filt <- LOG_ISS_matrix[,matching_genes_2]
+
+SCT_norm_filt <- SCT_norm_filt[,matching_genes_2]
+RPM_norm_filt <- RPM_norm_filt[,matching_genes_2]
+```
+
+```{r}
+SCT_norm_df <- as.data.frame(SCT_norm_filt)
+RPM_norm_df <- as.data.frame(RPM_norm_filt)
+```
+
+
+### Assign labels for classification
+
+```{r}
+# Check that the barcodes match
+all(rownames(LOG_ISS_matrix_filt) == rownames(SCT_ISS_matrix_filt))
+all(rownames(LOG_ISS_matrix_filt) == combined_barcodes)
+```
+
+```{r}
+neighborhood_labels <- rep(NA, nrow(LOG_ISS_matrix_filt))
+names(neighborhood_labels) <- combined_barcodes
+
+# Since there are no 'tumor neighborhood' prolif. inv. tumor cells, I can assign the label based on two conditions
+for (barcode in combined_barcodes) {
+  if (barcode %in% invasive_90_barcodes) {
+    neighborhood_labels[barcode] <- "Tumor Core"
+  } else {
+    neighborhood_labels[barcode] <- "Tumor Surface"
+  }
+}
+```
+
+```{r}
+LOG_ISS_df <- as.data.frame(LOG_ISS_matrix_filt)
+LOG_ISS_df$Neighborhood <- neighborhood_labels
+
+SCT_ISS_df <- as.data.frame(SCT_ISS_matrix_filt)
+SCT_ISS_df$Neighborhood <- neighborhood_labels
+```
+
+### Train LDA based on the assigned labels for TME classification
+
+```{r}
+LOG_LDA <- lda(Neighborhood ~ ., LOG_ISS_df)
+```
+
+```{r}
+SCT_LDA <- lda(Neighborhood ~ ., SCT_ISS_df)
+```
+
+To unofficially evaluate the performance of the LDA, predict on the same ISS invasive tumor cell dataset.
+
+Confusion matrix: 
+
+```{r}
+LOG_p <- predict(LOG_LDA, LOG_ISS_df)$class
+LOG_tab <- table(Predicted = LOG_p, Actual = LOG_ISS_df$Neighborhood)
+LOG_tab
+```
+
+Accuracy:
+
+```{r}
+sum(diag(LOG_tab))/sum(LOG_tab)
+```
+
+Confusion matrix:
+
+```{r}
+SCT_p <- predict(SCT_LDA, SCT_ISS_df)$class
+SCT_tab <- table(Predicted = SCT_p, Actual = SCT_ISS_df$Neighborhood)
+SCT_tab
+```
+
+Accuracy:
+
+```{r}
+sum(diag(SCT_tab))/sum(SCT_tab)
+```
+
+### Apply ISS-trained LDA on scRNA-seq data
+
+```{r}
+RPM_sc_p <- predict(LOG_LDA, RPM_norm_df)$class
+RPM_sc_LDA <- predict(LOG_LDA, RPM_norm_df)
+table(RPM_sc_p)
+```
+
+Save the predicted labels:
+
+```{r}
+saveRDS(RPM_sc_p, file = "RPM_sc_p.rds")
+saveRDS(RPM_sc_LDA, file = "RPM_sc_LDA.rds")
+```
+
+Repeat for SCT
+
+```{r}
+SCT_sc_p <- predict(SCT_LDA, SCT_norm_df)$class
+SCT_sc_LDA <- predict(SCT_LDA, SCT_norm_df)
+table(SCT_sc_p)
+```
+
+### Differential gene expression (DGE) analysis
+
+Use the obtained labels (tumor core vs. tumor surface) for the DGE analysis on scRNA-seq invasive tumor cell population:
+
+- But instead of using the set of matching genes between ISS and scRNA-seq, perform the analysis on the whole scRNA-seq transcriptome
+
+```{r}
+all(colnames(RPM_norm) == rownames(RPM_norm_filt))
+all(colnames(SCT_norm) == rownames(SCT_norm_filt))
+```
+```{r}
+RPM_norm_df_all <- as.data.frame(RPM_norm)
+SCT_norm_df_all <- as.data.frame(SCT_norm)
+```
+
+Create a Seurat object from the matrices and assign the labels
+
+```{r}
+RPM_assay_all <- CreateAssayObject(RPM_norm_df_all)
+RPM_se_all <- CreateSeuratObject(counts = RPM_assay_all)
+RPM_se_all$Predicted_Neighborhood <- RPM_sc_p
+Idents(RPM_se_all) <- "Predicted_Neighborhood"
+```
+
+```{r}
+head(RPM_se_all[[]])
+```
+
+Apply Seurat's FindMarkers() for the identification of differentially expressed genes.
+
+
+Using 'Tumor Core' as the ident.1 and 'Tumor Surface' as ident.2 will show the markers upregulated in:
+- Tumor Core as positive
+- Tumor Surface as negative 
+
+```{r}
+RPM_sc_all_markers <- FindMarkers(RPM_se_all, ident.1 = "Tumor Core", ident.2 = "Tumor Surface")
+```
+
+```{r}
+EnhancedVolcano(RPM_sc_all_markers,
+                lab = rownames(RPM_sc_all_markers),
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                pCutoff = 10e-12, 
+                FCcutoff = 1.5,   
+                pointSize = 3.0,
+                labSize = 4.0,
+                ylim = c(0, 50))  
+```
+
+Repeat for SCT
+
+```{r}
+SCT_assay_all <- CreateAssayObject(SCT_norm_df_all)
+SCT_se_all <- CreateSeuratObject(counts = SCT_assay_all)
+SCT_se_all$Predicted_Neighborhood <- SCT_sc_p
+Idents(SCT_se_all) <- "Predicted_Neighborhood"
+```
+
+```{r}
+SCT_sc_all_markers <- FindMarkers(SCT_se_all, ident.1 = "Tumor Core", ident.2 = "Tumor Surface")
+```
+
+```{r}
+EnhancedVolcano(SCT_sc_all_markers,
+                lab = rownames(SCT_sc_all_markers),
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                pCutoff = 10e-12, 
+                FCcutoff = 1.5,   
+                pointSize = 3.0,
+                labSize = 4.0,
+                ylim = c(0, 50))  
+```
+
+### Enrichment analysis with ClusterProfiler 
+
+Perform over-representation analysis (ORA) with enrichGO() and pathway enrichment analysis with enrichKEGG().
+
+```{r}
+# we want the log2 fold change 
+RPM_sc_gene_list <- RPM_sc_all_markers$avg_log2FC
+names(RPM_sc_gene_list) <- rownames(RPM_sc_all_markers)
+RPM_sc_gene_list <- na.omit(RPM_sc_gene_list)
+```
+
+```{r}
+# we want the log2 fold change 
+SCT_sc_gene_list <- SCT_sc_all_markers$avg_log2FC
+names(SCT_sc_gene_list) <- rownames(SCT_sc_all_markers)
+SCT_sc_gene_list <- na.omit(SCT_sc_gene_list)
+```
+
+```{r}
+# Separate tumor core and tumor surface genes based on expression lvls
+RPM_sc_gene_list_tc <- RPM_sc_gene_list[RPM_sc_gene_list > 0]
+RPM_sc_gene_list_ts <- RPM_sc_gene_list[RPM_sc_gene_list < 0]
+
+# Sort the gene lists in decreasing order (required for clusterProfiler)
+RPM_sc_gene_list_tc <- sort(RPM_sc_gene_list_tc, decreasing = TRUE)
+RPM_sc_gene_list_ts <- sort(RPM_sc_gene_list_ts, decreasing = TRUE)
+```
+
+```{r}
+# Separate tumor core and tumor surface genes based on expression lvls
+SCT_sc_gene_list_tc <- SCT_sc_gene_list[SCT_sc_gene_list > 0]
+SCT_sc_gene_list_ts <- SCT_sc_gene_list[SCT_sc_gene_list < 0]
+
+# Sort the gene lists in decreasing order (required for clusterProfiler)
+SCT_sc_gene_list_tc <- sort(SCT_sc_gene_list_tc, decreasing = TRUE)
+SCT_sc_gene_list_ts <- sort(SCT_sc_gene_list_ts, decreasing = TRUE)
+```
+
+
+We need the ensembl IDs for genes
+
+```{r}
+colnames(sc_features) <- c("ensembl","gene","gene_expression")
+gene_mapping <- setNames(sc_features$ensembl, sc_features$gene)
+```
+
+Map genes to the fold change values
+
+```{r}
+mapped_RPM_sc_gene_list_tc <- RPM_sc_gene_list_tc[names(RPM_sc_gene_list_tc) %in% names(gene_mapping)]
+mapped_RPM_sc_gene_list_ts <- RPM_sc_gene_list_ts[names(RPM_sc_gene_list_ts) %in% names(gene_mapping)]
+RPM_ensembl_ids_tc <- gene_mapping[names(mapped_RPM_sc_gene_list_tc)]
+RPM_ensembl_ids_ts <- gene_mapping[names(mapped_RPM_sc_gene_list_ts)]
+
+final_RPM_sc_gene_list_tc <- setNames(mapped_RPM_sc_gene_list_tc, RPM_ensembl_ids_tc)
+final_RPM_sc_gene_list_ts <- setNames(mapped_RPM_sc_gene_list_ts, RPM_ensembl_ids_ts)
+```
+
+
+```{r}
+mapped_SCT_sc_gene_list_tc <- SCT_sc_gene_list_tc[names(SCT_sc_gene_list_tc) %in% names(gene_mapping)]
+mapped_SCT_sc_gene_list_ts <- SCT_sc_gene_list_ts[names(SCT_sc_gene_list_ts) %in% names(gene_mapping)]
+SCT_ensembl_ids_tc <- gene_mapping[names(mapped_SCT_sc_gene_list_tc)]
+SCT_ensembl_ids_ts <- gene_mapping[names(mapped_SCT_sc_gene_list_ts)]
+
+final_SCT_sc_gene_list_tc <- setNames(mapped_SCT_sc_gene_list_tc, SCT_ensembl_ids_tc)
+final_SCT_sc_gene_list_ts <- setNames(mapped_SCT_sc_gene_list_ts, SCT_ensembl_ids_ts)
+```
+
+Reset the plan to sequential - we don't need parallel processing anymore.
+
+```{r}
+plan(sequential)
+plan()
+```
+
+GO:
+
+```{r}
+GO_RPM_sc_tc <- enrichGO(gene = names(final_RPM_sc_gene_list_tc), 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             pvalueCutoff = 0.05, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+```
+
+```{r}
+GO_RPM_sc_ts <- enrichGO(gene = names(final_RPM_sc_gene_list_ts), 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             pvalueCutoff = 0.05, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+```
+
+```{r}
+GO_SCT_sc_tc <- enrichGO(gene = names(final_SCT_sc_gene_list_tc), 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             pvalueCutoff = 0.05, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+```
+
+```{r}
+GO_SCT_sc_ts <- enrichGO(gene = names(final_SCT_sc_gene_list_ts), 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             pvalueCutoff = 0.05, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+```
+
+For KEGG analysis, we need the entrez IDs - map ensembl IDs to entrez ones.
+
+```{r}
+entrez_RPM_sc_genes_tc <- mapIds(org.Hs.eg.db,
+                     keys = names(final_RPM_sc_gene_list_tc),  
+                     column = "ENTREZID",                   
+                     keytype = "ENSEMBL",                   
+                     multiVals = "first")                   
+```
+
+```{r}
+entrez_RPM_sc_genes_ts <- mapIds(org.Hs.eg.db,
+                     keys = names(final_RPM_sc_gene_list_ts),  
+                     column = "ENTREZID",                   
+                     keytype = "ENSEMBL",                   
+                     multiVals = "first")                   
+```
+
+```{r}
+entrez_SCT_sc_genes_tc <- mapIds(org.Hs.eg.db,
+                     keys = names(final_SCT_sc_gene_list_tc),  
+                     column = "ENTREZID",                   
+                     keytype = "ENSEMBL",                   
+                     multiVals = "first")                   
+```
+
+```{r}
+entrez_SCT_sc_genes_ts <- mapIds(org.Hs.eg.db,
+                     keys = names(final_SCT_sc_gene_list_ts),  
+                     column = "ENTREZID",                   
+                     keytype = "ENSEMBL",                   
+                     multiVals = "first")                   
+```
+
+KEGG:
+
+```{r}
+KEGG_RPM_sc_tc <- enrichKEGG(gene = entrez_RPM_sc_genes_tc,
+                        organism = "hsa",
+                        keyType = "ncbi-geneid",
+                        pvalueCutoff = 0.05,
+                        pAdjustMethod = "BH")
+```
+
+```{r}
+KEGG_RPM_sc_ts <- enrichKEGG(gene = entrez_RPM_sc_genes_ts,
+                        organism = "hsa",
+                        keyType = "ncbi-geneid",
+                        pvalueCutoff = 0.05,
+                        pAdjustMethod = "BH")
+```
+
+```{r}
+KEGG_SCT_sc_tc <- enrichKEGG(gene = entrez_SCT_sc_genes_tc,
+                        organism = "hsa",
+                        keyType = "ncbi-geneid",
+                        pvalueCutoff = 0.05,
+                        pAdjustMethod = "BH")
+```
+
+```{r}
+KEGG_SCT_sc_ts <- enrichKEGG(gene = entrez_SCT_sc_genes_ts,
+                        organism = "hsa",
+                        keyType = "ncbi-geneid",
+                        pvalueCutoff = 0.05,
+                        pAdjustMethod = "BH")
+```
+
+Plot the GO results with barplots:
+
+```{r}
+barplot(GO_RPM_sc_tc, showCategory = 10) + ggtitle("RPM GO: Tumor Core")
+```
+
+```{r}
+barplot(GO_RPM_sc_ts, showCategory = 10) + ggtitle("RPM GO: Tumor Surface")
+```
+
+```{r}
+barplot(GO_SCT_sc_tc, showCategory = 10) + ggtitle("SCT GO: Tumor Core")
+```
+
+```{r}
+barplot(GO_SCT_sc_ts, showCategory = 10) + ggtitle("SCT GO: Tumor Surface")
+```
+
+KEGG results can be visualized in various ways, let's try dotplot:
+
+```{r}
+dotplot(KEGG_RPM_sc_tc, showCategory=15) + ggtitle("RPM KEGG: Tumor Core")
+```
+
+```{r}
+dotplot(KEGG_RPM_sc_ts, showCategory=15) + ggtitle("RPM KEGG: Tumor Surface")
+```
+
+```{r}
+dotplot(KEGG_SCT_sc_tc, showCategory=15) + ggtitle("SCT KEGG: Tumor Core")
+```
+
+```{r}
+dotplot(KEGG_SCT_sc_ts, showCategory=15) + ggtitle("SCT KEGG: Tumor Surface")
+```
+
+Use emapplot() for visualizing significant pathways as networks:
+
+```{r}
+KEGG_RPM_sc_tc_sim <- pairwise_termsim(KEGG_RPM_sc_tc)
+emapplot(KEGG_RPM_sc_tc_sim, cex_label_category = 0.4) + ggtitle("RPM KEGG: Tumor Core")
+```
+
+```{r}
+KEGG_RPM_sc_ts_sim <- pairwise_termsim(KEGG_RPM_sc_ts)
+emapplot(KEGG_RPM_sc_ts_sim, cex_label_category = 0.4) + ggtitle("RPM KEGG: Tumor Surface")
+```
+
+```{r}
+KEGG_SCT_sc_tc_sim <- pairwise_termsim(KEGG_SCT_sc_tc)
+emapplot(KEGG_SCT_sc_tc_sim, cex_label_category = 0.4) + ggtitle("SCT KEGG: Tumor Core")
+```
+
+```{r}
+KEGG_SCT_sc_ts_sim <- pairwise_termsim(KEGG_SCT_sc_ts)
+emapplot(KEGG_SCT_sc_ts_sim, cex_label_category = 0.4) + ggtitle("SCT KEGG: Tumor Surface")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
