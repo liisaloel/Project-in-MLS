@@ -1,0 +1,578 @@
+---
+title: "scRNA-seq Data Analysis"
+output: html_notebook
+---
+
+### Loading libraries
+```{r load_seurat}
+  library(Seurat)
+  library(gprofiler2)
+  library(ggplot2)
+  library(dplyr)
+  library(magrittr)
+  library(Matrix)
+  library(viridis)
+  library(pheatmap)
+  library(sctransform)
+  library(future)
+  library(igraph)
+  library(pals)
+  library(umap)
+```
+
+### Define color palettes for plotting
+
+```{r}
+colors <- pals::glasbey(20)
+sequential <- pals::cividis(100)
+```
+
+
+### 1) Loading the data
+
+Data is available here: https://drive.google.com/drive/folders/14Y6csHwBJ_KGR7pPU6bO8sgFhsNSSfaT?usp=drive_link
+
+Metadata: https://drive.google.com/drive/folders/1XHkZ_wsk9y_LQwP4ydhZ5cj7kCtyat9v?usp=drive_link
+
+Change the location of files accordingly.
+
+```{r}
+count_matrix <- readMM("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/matrix.mtx")
+
+features <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/features.tsv", sep="\t", header=FALSE, stringsAsFactors=FALSE)
+
+barcodes <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/barcodes.tsv", header=FALSE, stringsAsFactors=FALSE)
+```
+
+### Load metadata
+
+```{r}
+metadata <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/Fig2a_scFFPE-seq_UMAP.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+
+head(metadata)
+```
+
+```{r}
+# Set names for rows and columns in the count matrix
+rownames(count_matrix) <- features$V2  # gene symbols as row names
+colnames(count_matrix) <- barcodes$V1  # barcodes as column names
+```
+
+### Quality control and subsampling cells
+
+Remove cells with no annotation, remove cells from metadata not present in the count matrix.
+
+```{r}
+barcodes <- intersect(rownames(metadata), colnames(count_matrix))
+count_matrix_filt <- count_matrix[,barcodes]
+metadata_subset <- metadata[barcodes,]
+all(rownames(metadata_subset) == colnames(count_matrix_filt))
+```
+Pull barcodes for 100 cells per celltype (92 for mast cells)
+
+```{r}
+metadata_subset$barcodes <- rownames(metadata_subset)
+sampled_cells <- metadata_subset %>%
+  group_by(Annotation) %>%
+  slice_sample(n = 100, replace = FALSE) %>% 
+  pull(barcodes)
+```
+
+```{r}
+count_matrix_subset <- count_matrix_filt[, sampled_cells]
+
+all(sampled_cells %in% colnames(count_matrix_subset))
+
+table(metadata_subset$Annotation[rownames(metadata_subset) %in% colnames(count_matrix_subset)])
+```
+
+### Normalization - SCT and RPM
+
+Normalization using SCTransform (variance stabilizing transformation from the sctransform package)
+
+1) Increase memory usage
+
+```{r}
+options(future.globals.maxSize = 1600 * 1024^2)  
+```
+
+
+2) Parallelization with the 'future' package - normalization spread over 4 workers
+
+3) Apply vst or variance stabilizing transformation from sctransform 
+
+```{r}
+plan() #check current plan
+```
+
+```{r}
+# Set a new plan
+plan(multisession, workers = 4) 
+
+# Apply sctransform
+SCT_norm <- sctransform::vst(as.matrix(count_matrix_subset))$y #$y to only access the normalized matrix
+```
+
+RPM Normalization
+
+log(count / total count per cell) * (median total count + 1)
+
+```{r}
+# Calculate median sequencing depth for the scaling factor
+total_counts <- colSums(count_matrix_subset)
+scaling_factor <- median(total_counts)
+RPM_norm <- t(t(count_matrix_subset) / total_counts) * scaling_factor
+
+# log transformation
+RPM_norm <- log2(RPM_norm + 1)
+```
+
+Match genes for SCT and RPM datasets
+
+```{r}
+common_genes <- intersect(rownames(RPM_norm), rownames(SCT_norm))
+RPM_norm <- RPM_norm[common_genes, ]
+SCT_norm <- SCT_norm[common_genes, ]
+```
+
+### Run PCA
+
+```{r}
+t_RPM_norm <- t(RPM_norm)
+t_SCT_norm <- t(SCT_norm)
+```
+
+```{r}
+RPM_PCA <- prcomp(t_RPM_norm, rank = 30)
+SCT_PCA <- prcomp(t_SCT_norm, rank = 30)
+```
+
+```{r}
+# Extract PC scores from prcomp object
+RPM_PCA_scores <- as.data.frame(RPM_PCA$x)
+SCT_PCA_scores <- as.data.frame(SCT_PCA$x)
+```
+
+Add metadata
+
+```{r}
+# Reorder
+RPM_metadata_subset <- metadata_subset[match(rownames(RPM_PCA_scores), rownames(metadata_subset)), ]
+# Check that the cell barcodes still match for RPM_PCA_scores and count_matrix_filt_subset
+all(rownames(RPM_PCA_scores) == (colnames(count_matrix_subset)))
+```
+
+```{r}
+# Then go ahead and add the annotations and transcript counts to the PCA score dataframe
+RPM_PCA_scores$Annotation <- RPM_metadata_subset$Annotation
+RPM_PCA_scores$transcript_counts <- total_counts
+```
+
+Repeat for SCT
+
+```{r}
+# Reorder
+SCT_metadata_subset <- metadata_subset[match(rownames(SCT_PCA_scores), rownames(metadata_subset)), ]
+all(rownames(SCT_PCA_scores) == (colnames(count_matrix_subset)))
+```
+
+```{r}
+SCT_PCA_scores$Annotation <- SCT_metadata_subset$Annotation
+SCT_PCA_scores$transcript_counts <- total_counts
+```
+
+
+Visualize the PCAs
+
+```{r}
+RPM_PCA_scores$Annotation <- as.factor(RPM_PCA_scores$Annotation)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = RPM_PCA_scores$PC1,
+  y = RPM_PCA_scores$PC2,
+  col = colors[RPM_PCA_scores$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "PC1",
+  ylab = "PC2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(RPM_PCA_scores$Annotation),
+       col = colors[1:nlevels(RPM_PCA_scores$Annotation)], # get the nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # adjust text size if needed
+       pt.cex = 1,  # point size in legend 
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+```{r}
+# Rescale counts to fit the color palette because there are more values than colors 
+RPM_rescaled_counts <- scales::rescale(RPM_PCA_scores$transcript_counts, to = c(1, 100))
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = RPM_PCA_scores$PC1,
+  y = RPM_PCA_scores$PC2,
+  col = sequential[RPM_rescaled_counts],
+  pch = 19,
+  cex = 0.5,
+  xlab = "PC1",
+  ylab = "PC2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend_colors <- sequential[seq(1, 100, length.out = 5)]
+legend_values <- seq(min(RPM_PCA_scores$transcript_counts), 
+                           max(RPM_PCA_scores$transcript_counts), 
+                           length.out = 5)
+
+
+legend(x = coord[2]+1, y = coord[4],
+       legend = legend_values,
+       fill = legend_colors,
+       title = "Sequencing Depth",
+       bty = "n",
+       cex = 0.8, 
+       xpd = TRUE) 
+```
+
+```{r}
+SCT_PCA_scores$Annotation <- as.factor(SCT_PCA_scores$Annotation)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_PCA_scores$PC1,
+  y = SCT_PCA_scores$PC2,
+  col = colors[SCT_PCA_scores$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "PC1",
+  ylab = "PC2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(SCT_PCA_scores$Annotation),
+       col = colors[1:nlevels(SCT_PCA_scores$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  
+       pt.cex = 1, 
+       xpd = TRUE) 
+```
+
+```{r}
+# Rescale counts to fit the color palette because there are more values than colors 
+SCT_rescaled_counts <- scales::rescale(SCT_PCA_scores$transcript_counts, to = c(1, 100))
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_PCA_scores$PC1,
+  y = SCT_PCA_scores$PC2,
+  col = sequential[SCT_rescaled_counts],
+  pch = 19,
+  cex = 0.5,
+  xlab = "PC1",
+  ylab = "PC2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend_colors <- sequential[seq(1, 100, length.out = 5)]
+legend_values <- seq(min(SCT_PCA_scores$transcript_counts), 
+                           max(SCT_PCA_scores$transcript_counts), 
+                           length.out = 5)
+
+
+legend(x = coord[2]+1, y = coord[4],
+       legend = legend_values,
+       fill = legend_colors,
+       title = "Sequencing Depth",
+       bty = "n",
+       cex = 0.8, 
+       xpd = TRUE) 
+```
+
+### Elbowplots
+
+```{r}
+RPM_PCA_scores_e <- as.matrix(RPM_PCA_scores[,-31:-32])
+
+# Also extract stdev from prcomp object
+RPM_PCA_stdev <- RPM_PCA$sdev
+
+# Create a Seurat object from counts
+RPM_assay <- CreateAssayObject(RPM_norm) 
+RPM_se <- CreateSeuratObject(RPM_assay, assay = "RNA", meta.data = metadata_subset)
+RPM_se[["pca"]] <- CreateDimReducObject(embeddings = RPM_PCA_scores_e, key = "PC_", assay = DefaultAssay(RPM_se)) # add PCA
+RPM_se[["pca"]]@stdev <- RPM_PCA_stdev #add stdev
+```
+
+```{r}
+ElbowPlot(RPM_se) 
+```
+
+RPM: PC = 17
+
+
+```{r}
+SCT_PCA_scores_e <- as.matrix(SCT_PCA_scores[,-31:-32])
+
+# Also extract stdev from prcomp object
+SCT_PCA_stdev <- SCT_PCA$sdev
+
+# Seurat object from counts
+SCT_assay <- CreateAssayObject(SCT_norm) 
+SCT_se <- CreateSeuratObject(SCT_assay, assay = "RNA", meta.data = metadata_subset)
+SCT_se[["pca"]] <- CreateDimReducObject(embeddings = SCT_PCA_scores_e, key = "PC_", assay = DefaultAssay(SCT_se)) # add PCA
+SCT_se[["pca"]]@stdev <- SCT_PCA_stdev #add stdev
+```
+
+```{r}
+ElbowPlot(SCT_se) 
+```
+
+SCT: PC = 19
+
+### Run UMAP
+
+```{r}
+# Use the number of PCs deemed appropriate previously
+RPM_PCA_scores_e <- RPM_PCA_scores_e[,1:17]
+SCT_PCA_scores_e <- SCT_PCA_scores_e[,1:19]
+
+RPM_UMAP <- umap(RPM_PCA_scores_e)
+SCT_UMAP <- umap(SCT_PCA_scores_e)
+```
+
+```{r}
+# Extract umap coordinates for plotting
+RPM_UMAP_df <- as.data.frame(RPM_UMAP$layout) 
+```
+
+```{r}
+# Reorder to match
+RPM_metadata_subset <- RPM_metadata_subset[match(rownames(RPM_UMAP_df), rownames(RPM_metadata_subset)), ]
+all(rownames(RPM_UMAP_df) == (colnames(count_matrix_subset)))
+```
+
+```{r}
+# Add metadata to the UMAP dataframe
+RPM_UMAP_df$Annotation <- RPM_metadata_subset$Annotation
+RPM_UMAP_df$transcript_counts <- total_counts
+colnames(RPM_UMAP_df)[1] <- "UMAP1"  
+colnames(RPM_UMAP_df)[2] <- "UMAP2"
+```
+
+
+```{r}
+# Extract umap coordinates for plotting
+SCT_UMAP_df <- as.data.frame(SCT_UMAP$layout) 
+```
+
+```{r}
+# Reorder to match
+SCT_metadata_subset <- SCT_metadata_subset[match(rownames(SCT_UMAP_df), rownames(SCT_metadata_subset)), ]
+all(rownames(SCT_UMAP_df) == (colnames(count_matrix_subset)))
+```
+
+```{r}
+# Add metadata to the UMAP dataframe
+SCT_UMAP_df$Annotation <- SCT_metadata_subset$Annotation
+SCT_UMAP_df$transcript_counts <- total_counts
+colnames(SCT_UMAP_df)[1] <- "UMAP1"  
+colnames(SCT_UMAP_df)[2] <- "UMAP2"
+```
+
+
+### Visualize UMAP
+
+
+```{r}
+RPM_UMAP_df$Annotation <- as.factor(RPM_UMAP_df$Annotation)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = RPM_UMAP_df$UMAP1,
+  y = RPM_UMAP_df$UMAP2,
+  col = colors[RPM_UMAP_df$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(RPM_UMAP_df$Annotation),
+       col = colors[1:nlevels(RPM_UMAP_df$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # adjust text size if needed
+       pt.cex = 1,  # point size in legend 
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = RPM_UMAP_df$UMAP1,
+  y = RPM_UMAP_df$UMAP2,
+  col = sequential[RPM_rescaled_counts],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend_colors <- sequential[seq(1, 100, length.out = 5)]
+legend_values <- seq(min(RPM_UMAP_df$transcript_counts), 
+                           max(RPM_UMAP_df$transcript_counts), 
+                           length.out = 5)
+
+
+legend(x = coord[2]+1, y = coord[4],
+       legend = legend_values,
+       fill = legend_colors,
+       title = "Sequencing Depth",
+       bty = "n",
+       cex = 0.8, 
+       xpd = TRUE) 
+```
+
+```{r}
+SCT_UMAP_df$Annotation <- as.factor(SCT_UMAP_df$Annotation)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_UMAP_df$UMAP1,
+  y = SCT_UMAP_df$UMAP2,
+  col = colors[SCT_UMAP_df$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(SCT_UMAP_df$Annotation),
+       col = colors[1:nlevels(SCT_UMAP_df$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  
+       pt.cex = 1,  
+       xpd = TRUE) 
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_UMAP_df$UMAP1,
+  y = SCT_UMAP_df$UMAP2,
+  col = sequential[SCT_rescaled_counts],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend_colors <- sequential[seq(1, 100, length.out = 5)]
+legend_values <- seq(min(SCT_UMAP_df$transcript_counts), 
+                           max(SCT_UMAP_df$transcript_counts), 
+                           length.out = 5)
+
+
+legend(x = coord[2]+1, y = coord[4],
+       legend = legend_values,
+       fill = legend_colors,
+       title = "Sequencing Depth",
+       bty = "n",
+       cex = 0.8, 
+       xpd = TRUE) 
+```
+
+### Save RPM normalized and SCTransformed matrices
+
+```{r}
+saveRDS(RPM_norm, file = "RPM_norm_matrix_sc.rds")
+saveRDS(SCT_norm, file = "SCT_norm_matrix_sc.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
