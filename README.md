@@ -13,7 +13,7 @@ This repository contains the resources for analyzing breast cancer scRNA-seq and
 ### Notebooks
 - For scRNA-seq data handling, refer to the script in the scRNA-seq folder.
 - For Xenium ISS data handling and scRNA-seq projections, refer to the script in the ISS folder.
-- For various LDA applications, refer to the scripts in the LDA folder: LDA-17.rmd for cell type annotations for 17 cell types; 
+- For various LDA applications, refer to the scripts in the LDA folder: LDA-17.rmd for cell type annotations for 17 cell types; Vizgen-script(LOG).rmd for cell type annotations for 3 cell types and TME annotations, validated on Vizgen data.
 - For DGE analysis, refer to the script in the DGE folder. (Disclaimer: This script also includes LDA training on ISS TME labels and application to scRNA-seq data for TME annotations.)
 
 ### References
