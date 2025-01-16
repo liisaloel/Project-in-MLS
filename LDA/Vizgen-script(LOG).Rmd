@@ -1,0 +1,493 @@
+---
+title: "Vizgen RPM"
+output: html_notebook
+---
+
+### Load libraries
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(gprofiler2)
+library(sctransform)
+library(magrittr)
+library(umap)
+library(stats)
+library(pals)
+library(EnhancedVolcano)
+library(future)
+library(MASS)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+```
+
+### Define color palettes for plotting
+
+```{r}
+colors <- pals::glasbey(20)
+sequential_ <- pals::cividis(100)
+```
+
+### Load ISS data
+
+```{r}
+ISS_matrix <- readMM("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/matrix.mtx")
+```
+
+```{r}
+features <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/features.tsv", sep="\t", header=FALSE, stringsAsFactors=FALSE)
+
+barcodes <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/barcodes.tsv", header=FALSE, stringsAsFactors=FALSE)
+
+metadata_ISS <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/Fig3e-j_Xenium.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+```
+
+Assign barcodes and genes as names for the ISS matrix
+
+```{r}
+colnames(features) <- c("ensembl","gene","gene_expression")
+rownames(ISS_matrix) <- features$gene
+colnames(ISS_matrix) <- barcodes$V1  
+```
+
+
+### Some filtering 
+
+First, filter the features
+
+```{r}
+features <- filter(features, gene_expression == "Gene Expression")
+```
+
+Filter matrix based on the filtered features
+
+```{r}
+genes_list <- features$gene
+
+ISS_matrix_filt <- ISS_matrix[genes_list, ]
+```
+
+Create a separate column for cell barcodes to keep track of them; remove unlabeled cells.
+
+```{r}
+metadata_ISS$barcodes <- rownames(metadata_ISS)
+metadata_ISS <- metadata_ISS[metadata_ISS$Cluster != "Unlabeled", ]
+```
+
+Filter and keep cells in metadata and matrix that are present in both
+
+```{r}
+ISS_barcodes <- intersect(metadata_ISS$barcodes, colnames(ISS_matrix_filt))
+ISS_matrix_filt <- ISS_matrix_filt[, ISS_barcodes]
+metadata_ISS <- metadata_ISS[metadata_ISS$barcodes %in% ISS_barcodes, ]
+```
+
+Now I need to load the Vizgen dataset and filter genes to match both datasets
+
+Data can be found here: https://drive.google.com/drive/folders/1otVdNjc-dc7fVHBWjEQ1eh7ZBqgfsuvw?usp=drive_link
+
+```{r}
+vizgen <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/Vizgen/data/HumanBreastCancerPatient1_cell_by_gene.csv", stringsAsFactors=FALSE, sep=",", header=TRUE, row.names=1)
+metadata_viz <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/Vizgen/data/HumanBreastCancerPatient1_cell_metadata.csv", stringsAsFactors=FALSE, sep=",", header=TRUE, row.names=1)
+```
+
+```{r}
+matching_genes <- intersect(colnames(vizgen), rownames(ISS_matrix_filt))
+vizgen_filt <- vizgen[,matching_genes]
+ISS_matrix_filt <- ISS_matrix_filt[matching_genes,]
+```
+
+Counts present that cause division by 0 errors - filter these cells out
+
+```{r}
+zero_counts <- colSums(ISS_matrix_filt) == 0
+zero_count_cells <- colnames(ISS_matrix_filt)[zero_counts]
+```
+
+```{r}
+ISS_matrix_filt <- ISS_matrix_filt[,!zero_counts]
+```
+
+### Normalizing the datasets: LOG normalization
+
+```{r}
+LOG_ISS <- log2(ISS_matrix_filt+1)
+```
+
+```{r}
+LOG_ISS_df <- as.data.frame(t(LOG_ISS))
+ISS_metadata_subset <- metadata_ISS[rownames(metadata_ISS) %in% rownames(LOG_ISS_df), ]
+LOG_ISS_df$Cluster <- ISS_metadata_subset$Cluster
+```
+
+Reassign clusters
+
+- DCIS 1 and 2 as DCIS
+- Invasive tumor and proliferative invasive tumor cells as invasive tumor
+- All other cell types as healthy
+
+```{r}
+LOG_ISS_df <- LOG_ISS_df %>%
+  mutate(Cluster = case_when(
+    Cluster %in% c("Invasive_Tumor", "Prolif_Invasive_Tumor") ~ "Invasive Tumor",
+    Cluster %in% c("DCIS 1", "DCIS 2") ~ "DCIS",
+    TRUE ~ "Healthy"  # all other clusters as 'healthy'
+  ))
+```
+
+Train an LDA for classifying these three cell types 
+
+```{r}
+ISS_LDA <- lda(Cluster ~ ., LOG_ISS_df)
+```
+
+Confusion matrix:
+
+```{r}
+ISS_p <- predict(ISS_LDA, LOG_ISS_df)$class
+ISS_tab <- table(Predicted = ISS_p, Actual = LOG_ISS_df$Cluster)
+ISS_tab
+```
+
+Accuracy:
+
+```{r}
+sum(diag(ISS_tab))/sum(ISS_tab)
+```
+
+### Normalize Vizgen data: LOG normalization
+
+```{r}
+zero_counts_viz <- rowSums(vizgen_filt) == 0
+vizgen_filt <- vizgen_filt[!zero_counts_viz,]
+vizgen_filt <- t(vizgen_filt)
+```
+
+```{r}
+LOG_viz <- log2(vizgen_filt+1)
+```
+
+```{r}
+LOG_viz_df <- as.data.frame(t(LOG_viz))
+```
+
+### Apply Vizgen data to LDA - cell type annotations
+
+```{r}
+viz_p <- predict(ISS_LDA, LOG_viz_df)$class
+viz_LDA <- predict(ISS_LDA, LOG_viz_df)
+table(viz_p)
+```
+
+### LDA for neighborhood classification
+
+### Load neighborhood data
+
+```{r}
+neighborhoods_matrix_10_cells <- load(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/DGE/data/neighborhoods_matrix_10_cells.Rdata")
+```
+
+- Filter for proliferative invasive and invasive tumor cells
+
+- Separate into tumor core and surface cells
+
+```{r}
+total_neighbors <- colSums(neighborhoods_matrix_number_filt)
+proportion_invasive <- neighborhoods_matrix_number_filt["Invasive_Tumor", ] / total_neighbors
+proportion_prolif <- neighborhoods_matrix_number_filt["Prolif_Invasive_Tumor", ] / total_neighbors
+
+invasive_90_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_invasive >= 0.9]
+prolif_90_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_prolif >= 0.9]
+
+invasive_40_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_invasive <= 0.4]
+prolif_40_barcodes <- colnames(neighborhoods_matrix_number_filt)[proportion_prolif <= 0.4]
+```
+
+To avoid duplicates in the filtered count matrix, keep unique barcodes 
+
+```{r}
+combined_barcodes <- unique(c(invasive_90_barcodes, prolif_90_barcodes, invasive_40_barcodes, prolif_40_barcodes))
+existing_barcodes <- combined_barcodes[combined_barcodes %in% colnames(LOG_ISS)]
+
+LOG_ISS_inv_tumor <- LOG_ISS[, existing_barcodes]
+```
+
+Assign labels:
+
+```{r}
+LOG_ISS_inv_tumor <- t(LOG_ISS_inv_tumor)
+neighborhood_labels <- rep(NA, nrow(LOG_ISS_inv_tumor))
+names(neighborhood_labels) <- existing_barcodes
+
+# Since there are no 'tumor neighborhood' prolif. inv. tumor cells, I can assign the label based on two conditions
+for (barcode in existing_barcodes) {
+  if (barcode %in% invasive_90_barcodes) {
+    neighborhood_labels[barcode] <- "Tumor Core"
+  } else {
+    neighborhood_labels[barcode] <- "Tumor Surface"
+  }
+}
+```
+
+```{r}
+LOG_ISS_inv_tumor_df <- as.data.frame(LOG_ISS_inv_tumor)
+LOG_ISS_inv_tumor_df$Neighborhood <- neighborhood_labels
+```
+
+Train the LDA
+
+```{r}
+ISS_inv_tumor_LDA <- lda(Neighborhood ~ ., LOG_ISS_inv_tumor_df)
+```
+
+Confusion matrix: 
+
+```{r}
+ISS_inv_tumor_p <- predict(ISS_inv_tumor_LDA, LOG_ISS_inv_tumor_df)$class
+ISS_inv_tumor_tab <- table(Predicted = ISS_inv_tumor_p, Actual = LOG_ISS_inv_tumor_df$Neighborhood)
+ISS_inv_tumor_tab
+```
+
+For some reason, this ISS-based LDA for TME annotation does not work.
+
+
+
+### Load scRNA-seq data
+
+```{r}
+sc_matrix <- readMM("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/matrix.mtx")
+
+sc_features <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/features.tsv", sep="\t", header=FALSE, stringsAsFactors=FALSE)
+
+sc_barcodes <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/barcodes.tsv", header=FALSE, stringsAsFactors=FALSE)
+```
+
+```{r}
+sc_metadata <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/Fig2a_scFFPE-seq_UMAP.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+```
+
+```{r}
+# Set names for rows and cols
+rownames(sc_matrix) <- sc_features$V2  # gene symbols as row names
+colnames(sc_matrix) <- sc_barcodes$V1  # barcodes as column names
+```
+
+Subset metadata and scRNA-seq count matrix to only contain cells present in both
+
+```{r}
+sc_barcodes <- intersect(rownames(sc_metadata), colnames(sc_matrix))
+```
+
+```{r}
+sc_metadata_subset <- sc_metadata[sc_barcodes,]
+sc_matrix_filt <- sc_matrix[,sc_barcodes]
+```
+
+Filter genes to match
+
+```{r}
+sc_viz_genes <- intersect(colnames(vizgen), rownames(sc_matrix_filt))
+vizgen_filt_sc <- vizgen[,sc_viz_genes]
+sc_matrix_filt <- sc_matrix_filt[sc_viz_genes,]
+```
+
+### Normalizing the datasets: RPM for scRNA-seq
+
+```{r}
+sc_total_counts <- colSums(sc_matrix_filt)
+sc_scaling_factor <- median(sc_total_counts)
+RPM_sc <- t(t(sc_matrix_filt) / sc_total_counts) * sc_scaling_factor
+
+# log transformation
+RPM_sc <- log2(RPM_sc + 1)
+```
+
+LOG normalization for Vizgen data
+
+```{r}
+zero_counts_viz_2 <- rowSums(vizgen_filt_sc) == 0
+vizgen_filt_sc <- vizgen_filt_sc[!zero_counts_viz_2,]
+vizgen_filt_sc <- t(vizgen_filt_sc)
+```
+
+```{r}
+LOG_viz_sc <- log2(vizgen_filt_sc+1)
+```
+
+
+### LDA for cell type annotation with sc data
+
+1) LDA based on sc annotations
+2) Apply to vizgen data
+
+```{r}
+RPM_sc_df <- as.data.frame(t(RPM_sc))
+sc_metadata_subset <- sc_metadata[rownames(sc_metadata) %in% rownames(RPM_sc_df), ]
+RPM_sc_df$Annotation <- sc_metadata_subset$Annotation
+```
+
+Reassign clusters
+
+```{r}
+RPM_sc_df <- RPM_sc_df %>%
+  mutate(Annotation = case_when(
+    Annotation %in% c("Invasive_Tumor", "Prolif_Invasive_Tumor") ~ "Invasive Tumor",
+    Annotation %in% c("DCIS 1", "DCIS 2") ~ "DCIS",
+    TRUE ~ "Healthy"  
+  ))
+```
+
+Train LDA
+
+```{r}
+sc_LDA <- lda(Annotation ~ ., RPM_sc_df)
+```
+
+Confusion matrix 
+
+```{r}
+sc_p <- predict(sc_LDA, RPM_sc_df)$class
+sc_tab <- table(Predicted = sc_p, Actual = RPM_sc_df$Annotation)
+sc_tab
+```
+
+Accuracy
+
+```{r}
+sum(diag(sc_tab))/sum(sc_tab)
+```
+
+```{r}
+LOG_viz_sc_df <- as.data.frame(t(LOG_viz_sc))
+```
+
+### Apply Vizgen data to LDA - cell type annotations
+
+```{r}
+viz_sc_p <- predict(sc_LDA, LOG_viz_sc_df)$class
+viz_sc_LDA <- predict(sc_LDA, LOG_viz_sc_df)
+table(viz_sc_p)
+```
+
+### LDA for neighborhood classification based on the previously predicted scRNA-seq neighborhoods
+
+1) First get the annotations from previous analysis (cell barcode and their corresponding label)
+2) Build the LDA on these annotations
+3) Apply the Vizgen data to the LDA (based on the previous cell type annotations - inv tumor cells)
+
+
+```{r}
+RPM_sc_LDA <- readRDS(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/Vizgen/data/RPM_sc_LDA.rds")
+RPM_sc_p <- readRDS(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/Vizgen/data/RPM_sc_p.rds")
+```
+
+Filter for invasive tumor cells in single cell data
+
+```{r}
+invasive_cells_sc <- rownames(sc_metadata_subset)[sc_metadata_subset$Annotation == "Invasive_Tumor"]
+prolif_invasive_cells_sc <- rownames(sc_metadata_subset)[sc_metadata_subset$Annotation == "Prolif_Invasive_Tumor"]
+```
+
+```{r}
+RPM_sc_inv <- RPM_sc[,c(invasive_cells_sc, prolif_invasive_cells_sc)]
+```
+
+
+```{r}
+sc_tumor_s_i <- RPM_sc_p == "Tumor Surface"
+sc_tumor_c_i <- RPM_sc_p == "Tumor Core"
+
+sc_tumor_s_barcodes <- colnames(RPM_sc_inv)[sc_tumor_s_i]
+sc_tumor_c_barcodes <- colnames(RPM_sc_inv)[sc_tumor_c_i]
+combined_sc_barcodes <- c(sc_tumor_s_barcodes, sc_tumor_c_barcodes)
+```
+
+```{r}
+RPM_sc_inv <- t(RPM_sc_inv)
+
+neighborhood_labels_sc <- rep(NA, nrow(RPM_sc_inv))
+names(neighborhood_labels_sc) <- combined_sc_barcodes
+
+for (barcode in combined_sc_barcodes) {
+  if (barcode %in% sc_tumor_c_barcodes) {
+    neighborhood_labels_sc[barcode] <- "Tumor Core"
+  } else {
+    neighborhood_labels_sc[barcode] <- "Tumor Surface"
+  }
+}
+
+RPM_sc_inv_df <- as.data.frame(RPM_sc_inv)
+RPM_sc_inv_df$Neighborhood <- neighborhood_labels_sc
+```
+
+Some genes have constant values across all the cells - identify and remove them
+
+```{r}
+constant_genes <- sapply(RPM_sc_inv_df[, -ncol(RPM_sc_inv_df)], function(x) {
+    var(x[RPM_sc_inv_df$Neighborhood == "Tumor Core"]) == 0 ||
+    var(x[RPM_sc_inv_df$Neighborhood == "Tumor Surface"]) == 0
+})
+
+constant_gene_names <- names(constant_genes[constant_genes])
+RPM_sc_inv_df_filt <- RPM_sc_inv_df[, !names(RPM_sc_inv_df) %in% constant_gene_names]
+```
+
+Train LDA for TME annotation, based on previous scRNA-seq TME labels
+
+```{r}
+sc_inv_LDA <- lda(Neighborhood ~ ., RPM_sc_inv_df_filt)
+```
+
+```{r}
+sc_inv_p <- predict(sc_inv_LDA, RPM_sc_inv_df_filt)$class
+sc_inv_tab <- table(Predicted = sc_inv_p, Actual = RPM_sc_inv_df_filt$Neighborhood)
+sc_inv_tab
+```
+
+```{r}
+sum(diag(sc_inv_tab))/sum(sc_inv_tab)
+```
+
+### Apply invasive tumor cells (based on predicted cell type annotations) from Vizgen data to the LDA
+
+```{r}
+viz_sc_inv_tumor_i <- viz_sc_p == "Invasive Tumor"
+viz_sc_inv_tumor_barcodes <- colnames(LOG_viz_sc)[viz_sc_inv_tumor_i]
+```
+
+```{r}
+LOG_viz_sc_inv <- LOG_viz_sc[,viz_sc_inv_tumor_barcodes]
+LOG_viz_sc_inv_df <- as.data.frame(t(LOG_viz_sc_inv))
+LOG_viz_sc_inv_df_filt <- LOG_viz_sc_inv_df[, !names(LOG_viz_sc_inv_df) %in% constant_gene_names]
+```
+
+```{r}
+viz_sc_inv_p <- predict(sc_inv_LDA, LOG_viz_sc_inv_df_filt)$class
+viz_sc_inv_LDA <- predict(sc_inv_LDA, LOG_viz_sc_inv_df_filt)
+table(viz_sc_inv_p)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
