@@ -1,0 +1,916 @@
+---
+title: "LDA on full ISS"
+output: html_notebook
+---
+
+## Load libraries
+
+```{r}
+library(klaR)
+library(psych)
+library(MASS)
+library(ggordiplots)
+library(devtools)
+library(Matrix)
+library(umap)
+library(pals)
+library(corrplot)
+library(preprocessCore)
+library(Seurat)
+```
+Create a color palette for plotting
+
+```{r}
+colors <- pals::glasbey(20)
+sequential <- pals::parula(100)
+```
+
+
+## Load data
+
+```{r}
+LOG_ISS_matrix <- readRDS(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/LDA/data/LOG_ISS_matrix.rds")
+SCT_ISS_matrix <- readRDS(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/LDA/data/SCT_ISS_matrix.rds")
+```
+
+```{r}
+metadata <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/Fig3e-j_Xenium.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+```
+
+
+```{r}
+LOG_ISS_df <- as.data.frame(t(as.matrix(LOG_ISS_matrix)))
+SCT_ISS_df <- as.data.frame(t(as.matrix(SCT_ISS_matrix)))
+```
+
+Add metadata
+
+```{r}
+LOG_metadata_subset <- metadata[rownames(metadata) %in% rownames(LOG_ISS_df), ]
+LOG_ISS_df$Cluster <- LOG_metadata_subset$Cluster
+
+SCT_metadata_subset <- metadata[rownames(metadata) %in% rownames(SCT_ISS_df), ]
+SCT_ISS_df$Cluster <- SCT_metadata_subset$Cluster
+```
+
+```{r}
+LOG_LDA <- lda(Cluster ~ ., LOG_ISS_df)
+```
+
+
+```{r}
+SCT_LDA <- lda(Cluster ~ ., SCT_ISS_df)
+# SCT_LDA
+```
+
+
+### Evaluation metrics
+
+Confusion matrix 
+
+```{r}
+LOG_p <- predict(LOG_LDA, LOG_ISS_df)$class
+LOG_tab <- table(Predicted = LOG_p, Actual = LOG_ISS_df$Cluster)
+LOG_tab
+```
+
+Accuracy
+
+```{r}
+sum(diag(LOG_tab))/sum(LOG_tab)
+```
+
+Confusion matrix
+
+```{r}
+SCT_p <- predict(SCT_LDA, SCT_ISS_df)$class
+SCT_tab <- table(Predicted = SCT_p, Actual = SCT_ISS_df$Cluster)
+SCT_tab
+```
+
+Accuracy
+
+```{r}
+sum(diag(SCT_tab))/sum(SCT_tab)
+```
+
+### Run UMAP
+
+```{r}
+SCT_r <- predict(SCT_LDA, SCT_ISS_df)
+SCT_LDA_results <- SCT_r$x
+```
+
+```{r}
+SCT_UMAP <- umap(SCT_LDA_results)
+```
+
+```{r}
+SCT_UMAP_df <- as.data.frame(SCT_UMAP$layout)
+
+SCT_metadata_subset <- SCT_metadata_subset[match(rownames(SCT_UMAP_df), rownames(SCT_metadata_subset)),]
+SCT_UMAP_df$Cluster <- SCT_metadata_subset$Cluster
+SCT_UMAP_df$transcript_counts <- SCT_metadata_subset$transcript_counts
+colnames(SCT_UMAP_df)[1] <- "UMAP1"  
+colnames(SCT_UMAP_df)[2] <- "UMAP2"
+```
+
+```{r}
+SCT_UMAP_df$Cluster <- as.factor(SCT_UMAP_df$Cluster)
+```
+
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_UMAP_df$UMAP1,
+  y = SCT_UMAP_df$UMAP2,
+  col = colors[SCT_UMAP_df$Cluster],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2]+0.5, y = coord[4],
+       legend = levels(SCT_UMAP_df$Cluster),
+       col = colors[1:nlevels(SCT_UMAP_df$Cluster)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       bty = "n",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+```{r}
+# Rescale to fit the color palette because there are more values than colors 
+SCT_rescaled_counts <- scales::rescale(SCT_UMAP_df$transcript_counts, to = c(1, 100))
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_UMAP_df$UMAP1,
+  y = SCT_UMAP_df$UMAP2,
+  col = sequential[SCT_rescaled_counts],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend_colors <- sequential[seq(1, 100, length.out = 5)]
+legend_values <- seq(min(SCT_UMAP_df$transcript_counts), 
+                           max(SCT_UMAP_df$transcript_counts), 
+                           length.out = 5)
+
+
+legend(x = coord[2]+1, y = coord[4],
+       legend = legend_values,
+       fill = legend_colors,
+       title = "Sequencing Depth",
+       bty = "n",
+       cex = 0.8, 
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+```{r}
+LOG_r <- predict(LOG_LDA, LOG_ISS_df)
+LOG_LDA_results <- LOG_r$x
+```
+
+```{r}
+LOG_UMAP <- umap(LOG_LDA_results)
+```
+
+```{r}
+LOG_UMAP_df <- as.data.frame(LOG_UMAP$layout)
+
+LOG_metadata_subset <- LOG_metadata_subset[match(rownames(LOG_UMAP_df), rownames(LOG_metadata_subset)),]
+LOG_UMAP_df$Cluster <- LOG_metadata_subset$Cluster
+LOG_UMAP_df$transcript_counts <- LOG_metadata_subset$transcript_counts
+colnames(LOG_UMAP_df)[1] <- "UMAP1"  
+colnames(LOG_UMAP_df)[2] <- "UMAP2"
+```
+
+
+```{r}
+LOG_UMAP_df$Cluster <- as.factor(LOG_UMAP_df$Cluster)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = LOG_UMAP_df$UMAP1,
+  y = LOG_UMAP_df$UMAP2,
+  col = colors[LOG_UMAP_df$Cluster],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2]+0.5, y = coord[4],
+       legend = levels(LOG_UMAP_df$Cluster),
+       col = colors[1:nlevels(LOG_UMAP_df$Cluster)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       bty = "n",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+
+```{r}
+LOG_rescaled_counts <- scales::rescale(LOG_UMAP_df$transcript_counts, to = c(1, 100))
+```
+
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = LOG_UMAP_df$UMAP1,
+  y = LOG_UMAP_df$UMAP2,
+  col = sequential[LOG_rescaled_counts],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend_colors <- sequential[seq(1, 100, length.out = 5)]
+legend_values <- seq(min(LOG_UMAP_df$transcript_counts), 
+                           max(LOG_UMAP_df$transcript_counts), 
+                           length.out = 5)
+
+
+legend(x = coord[2]+1, y = coord[4],
+       legend = legend_values,
+       fill = legend_colors,
+       title = "Sequencing Depth",
+       bty = "n",
+       cex = 0.8, 
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+### Load sc data for projection
+
+```{r}
+RPM_sc_matrix <- readRDS(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/RPM_norm_matrix_sc.rds")
+SCT_sc_matrix <- readRDS(file = "C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/ISS/data/SCT_norm_matrix_sc.rds")
+```
+
+```{r}
+metadata_sc <- read.table("C:/Users/liisa/OneDrive/Töölaud/Project-in-MLS/scRNA-seq/data/Fig2a_scFFPE-seq_UMAP.csv", stringsAsFactors=FALSE, sep=";", header=TRUE, row.names=1)
+```
+
+```{r}
+RPM_sc_df <- as.data.frame(t(as.matrix(RPM_sc_matrix)))
+SCT_sc_df <- as.data.frame(t(as.matrix(SCT_sc_matrix)))
+```
+
+Filter so both datasets contain the same genes
+
+```{r}
+common_genes_sc <- intersect(colnames(RPM_sc_df), colnames(SCT_ISS_df))
+
+RPM_sc_df <- RPM_sc_df[,common_genes_sc]
+SCT_sc_df <- SCT_sc_df[,common_genes_sc]
+```
+
+Add metadata
+
+```{r}
+RPM_sc_metadata_subset <- metadata_sc[rownames(metadata_sc) %in% rownames(RPM_sc_df), ]
+RPM_sc_df$Annotation <- RPM_sc_metadata_subset$Annotation
+
+SCT_sc_metadata_subset <- metadata_sc[rownames(metadata_sc) %in% rownames(SCT_sc_df), ]
+SCT_sc_df$Annotation <- SCT_sc_metadata_subset$Annotation
+```
+
+
+Run ISS LDA on scRNA-seq data
+
+```{r}
+RPM_sc_p <- predict(LOG_LDA, RPM_sc_df)$class
+RPM_sc_LDA <- predict(LOG_LDA, RPM_sc_df)$x
+RPM_sc_tab <- table(Predicted = RPM_sc_p, Actual = RPM_sc_df$Annotation)
+RPM_sc_tab
+```
+
+```{r}
+SCT_sc_p <- predict(SCT_LDA, SCT_sc_df)$class
+SCT_sc_LDA <- predict(SCT_LDA, SCT_sc_df)$x
+SCT_sc_tab <- table(Predicted = SCT_sc_p, Actual = SCT_sc_df$Annotation)
+SCT_sc_tab
+```
+
+### Project sc results onto ISS LDA UMAP space
+
+```{r}
+SCT_sc_UMAP_projected <- predict(SCT_UMAP, SCT_sc_LDA)
+RPM_sc_UMAP_projected <- predict(LOG_UMAP, RPM_sc_LDA)
+```
+
+```{r}
+colnames(SCT_sc_UMAP_projected) <- c("UMAP1", "UMAP2")
+colnames(RPM_sc_UMAP_projected) <- c("UMAP1", "UMAP2")
+```
+
+```{r}
+SCT_sc_metadata_subset <- metadata_sc[rownames(metadata_sc) %in% rownames(SCT_sc_UMAP_projected), ]
+SCT_sc_UMAP_projected <- cbind(SCT_sc_UMAP_projected, Annotation = SCT_sc_metadata_subset$Annotation)
+```
+
+```{r}
+RPM_sc_metadata_subset <- metadata_sc[rownames(metadata_sc) %in% rownames(RPM_sc_UMAP_projected), ]
+RPM_sc_UMAP_projected <- cbind(RPM_sc_UMAP_projected, Annotation = RPM_sc_metadata_subset$Annotation)
+```
+
+
+```{r}
+RPM_sc_UMAP_projected_df <- as.data.frame(RPM_sc_UMAP_projected)
+RPM_sc_UMAP_projected_df$Annotation <- as.factor(RPM_sc_UMAP_projected_df$Annotation)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = RPM_sc_UMAP_projected_df$UMAP1,
+  y = RPM_sc_UMAP_projected_df$UMAP2,
+  col = colors[RPM_sc_UMAP_projected_df$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2]+0.5, y = coord[4],
+       legend = levels(RPM_sc_UMAP_projected_df$Annotation),
+       col = colors[1:nlevels(RPM_sc_UMAP_projected_df$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       bty = "n",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+```{r}
+SCT_sc_UMAP_projected_df <- as.data.frame(SCT_sc_UMAP_projected)
+SCT_sc_UMAP_projected_df$Annotation <- as.factor(SCT_sc_UMAP_projected_df$Annotation)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = SCT_sc_UMAP_projected_df$UMAP1,
+  y = SCT_sc_UMAP_projected_df$UMAP2,
+  col = colors[SCT_sc_UMAP_projected_df$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2]+0.5, y = coord[4],
+       legend = levels(SCT_sc_UMAP_projected_df$Annotation),
+       col = colors[1:nlevels(SCT_sc_UMAP_projected_df$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       bty = "n",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+Again, we can see that the projections are not informative without transformind the datasets to be similar beforehand.
+
+
+### Apply quantile normalization
+
+Quantile normalization:
+
+1) Concatenate datasets
+
+```{r}
+RPM_sc_matrix_filt <- RPM_sc_matrix[common_genes_sc,]
+LOG_ISS_matrix_filt <- LOG_ISS_matrix[common_genes_sc,]
+combined_RPM_LOG <- cbind(RPM_sc_matrix_filt, LOG_ISS_matrix_filt)
+```
+
+2) Normalize
+
+https://www.rdocumentation.org/packages/preprocessCore/versions/1.34.0/topics/normalize.quantiles
+
+```{r}
+qnormalized_RPM_LOG <- normalize.quantiles(as.matrix(combined_RPM_LOG))
+```
+
+3) Separate the datasets again
+
+```{r}
+q_RPM_sc_matrix <- qnormalized_RPM_LOG[, 1:ncol(RPM_sc_matrix_filt)]
+q_LOG_ISS_matrix <- qnormalized_RPM_LOG[, (ncol(RPM_sc_matrix_filt) + 1):ncol(combined_RPM_LOG)]
+```
+
+Fetch the barcodes
+
+```{r}
+barcodes_sc <- colnames(RPM_sc_matrix_filt)
+barcodes_ISS <- colnames(LOG_ISS_matrix_filt)
+```
+
+Assign gene names and cell barcodes again
+
+```{r} 
+rownames(q_LOG_ISS_matrix) <- common_genes_sc
+colnames(q_LOG_ISS_matrix) <- barcodes_ISS
+```
+
+Repeat for scRNA-seq data
+
+```{r} 
+rownames(q_RPM_sc_matrix) <- common_genes_sc
+colnames(q_RPM_sc_matrix) <- barcodes_sc
+```
+
+
+### Repeat for SCT
+
+Concatenate datasets
+
+```{r}
+SCT_sc_matrix_filt <- SCT_sc_matrix[common_genes_sc,]
+SCT_ISS_matrix_filt <- SCT_ISS_matrix[common_genes_sc,]
+combined_SCT <- cbind(SCT_sc_matrix_filt, SCT_ISS_matrix_filt)
+```
+
+Normalize
+
+```{r}
+qnormalized_SCT <- normalize.quantiles(as.matrix(combined_SCT))
+```
+
+Separate the datasets again
+
+```{r}
+q_SCT_sc_matrix <- qnormalized_SCT[, 1:ncol(SCT_sc_matrix_filt)]
+q_SCT_ISS_matrix <- qnormalized_SCT[, (ncol(SCT_sc_matrix_filt) + 1):ncol(combined_SCT)]
+```
+
+Fetch the barcodes
+
+```{r}
+barcodes_sc <- colnames(SCT_sc_matrix_filt)
+barcodes_ISS <- colnames(SCT_ISS_matrix_filt)
+```
+
+Assign gene names and cell barcodes again
+
+```{r} 
+rownames(q_SCT_ISS_matrix) <- common_genes_sc
+colnames(q_SCT_ISS_matrix) <- barcodes_ISS
+```
+
+Repeat for scRNA-seq data
+
+```{r} 
+rownames(q_SCT_sc_matrix) <- common_genes_sc
+colnames(q_SCT_sc_matrix) <- barcodes_sc
+```
+
+
+### PCA and UMAP on quantile normalized ISS data
+
+```{r}
+t_q_LOG_ISS_matrix <- t(q_LOG_ISS_matrix)
+t_q_SCT_ISS_matrix <- t(q_SCT_ISS_matrix)
+```
+
+
+```{r}
+q_LOG_PCA <- prcomp(t_q_LOG_ISS_matrix, rank = 30)
+```
+
+```{r}
+q_SCT_PCA <- prcomp(t_q_SCT_ISS_matrix, rank = 30)
+```
+
+
+### Visualize PCA
+
+Log transformed
+
+```{r}
+# Extract PC scores from prcomp object
+q_LOG_PCA_scores <- as.data.frame(q_LOG_PCA$x)
+```
+
+```{r}
+# Reorder
+q_LOG_metadata_subset <- LOG_metadata_subset[match(rownames(q_LOG_PCA_scores), rownames(LOG_metadata_subset)), ]
+
+# Add metadata to the PC scores
+q_LOG_PCA_scores$Cluster <- q_LOG_metadata_subset$Cluster
+```
+
+
+```{r}
+q_LOG_PCA_scores$Cluster <- as.factor(q_LOG_PCA_scores$Cluster)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = q_LOG_PCA_scores$PC1,
+  y = q_LOG_PCA_scores$PC2,
+  col = colors[q_LOG_PCA_scores$Cluster],
+  pch = 19,
+  cex = 0.5,
+  xlab = "PC1",
+  ylab = "PC2",
+)
+
+coord <- par("usr") # get plot coordinates
+legend(x = coord[2], y = coord[4],
+       legend = levels(q_LOG_PCA_scores$Cluster),
+       col = colors[1:nlevels(q_LOG_PCA_scores$Cluster)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # smaller text
+       pt.cex = 1,  # also smaller point size
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+SCT
+
+```{r}
+# Extract PC scores from prcomp object
+q_SCT_PCA_scores <- as.data.frame(q_SCT_PCA$x) 
+```
+
+```{r}
+# Check if the order of cells in metadata matches the order in PCA df
+q_SCT_metadata_subset <- SCT_metadata_subset[match(rownames(q_SCT_PCA_scores), rownames(SCT_metadata_subset)), ]
+
+# Add metadata to the PC scores
+q_SCT_PCA_scores$Cluster <- q_SCT_metadata_subset$Cluster
+```
+
+
+```{r}
+q_SCT_PCA_scores$Cluster <- as.factor(q_SCT_PCA_scores$Cluster)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = q_SCT_PCA_scores$PC1,
+  y = q_SCT_PCA_scores$PC2,
+  col = colors[q_SCT_PCA_scores$Cluster],
+  pch = 19,
+  cex = 0.5,
+  xlab = "PC1",
+  ylab = "PC2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(q_SCT_PCA_scores$Cluster),
+       col = colors[1:nlevels(q_SCT_PCA_scores$Cluster)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+### Elbowplots
+
+```{r}
+q_LOG_PCA_scores_e <- as.matrix(q_LOG_PCA_scores[,-31])
+
+# Also extract stdev from prcomp object
+q_LOG_PCA_stdev <- q_LOG_PCA$sdev
+
+q_LOG_ISS_assay <- CreateAssayObject(q_LOG_ISS_matrix)
+q_LOG_ISS_se <- CreateSeuratObject(q_LOG_ISS_assay, 
+                                 project = "XeniumProject",
+                                 assay = "Xenium",
+                                 meta.data = metadata)
+q_LOG_ISS_se[["pca"]] <- CreateDimReducObject(embeddings = q_LOG_PCA_scores_e, key = "PC_", assay = DefaultAssay(q_LOG_ISS_se)) # add PCA
+q_LOG_ISS_se[["pca"]]@stdev <- q_LOG_PCA_stdev #add stdev
+```
+
+```{r}
+ElbowPlot(q_LOG_ISS_se) 
+```
+
+LOG PC = 15
+
+
+```{r}
+q_SCT_PCA_scores_e <- as.matrix(q_SCT_PCA_scores[,-31])
+
+# Also extract stdev from prcomp object
+q_SCT_PCA_stdev <- q_SCT_PCA$sdev
+
+q_SCT_ISS_assay <- CreateAssayObject(q_SCT_ISS_matrix)
+q_SCT_ISS_se <- CreateSeuratObject(q_SCT_ISS_assay, 
+                                 project = "XeniumProject",
+                                 assay = "Xenium",
+                                 meta.data = metadata)
+q_SCT_ISS_se[["pca"]] <- CreateDimReducObject(embeddings = q_SCT_PCA_scores_e, key = "PC_", assay = DefaultAssay(q_SCT_ISS_se)) # add PCA
+q_SCT_ISS_se[["pca"]]@stdev <- q_SCT_PCA_stdev #add stdev
+```
+
+```{r}
+ElbowPlot(q_SCT_ISS_se) 
+```
+
+SCT PC = 17
+
+### Run UMAP
+
+```{r}
+q_LOG_PCA_scores_e <- q_LOG_PCA_scores_e[,1:15]
+q_SCT_PCA_scores_e <- q_SCT_PCA_scores_e[,1:17]
+
+q_LOG_UMAP <- umap(q_LOG_PCA_scores_e)
+q_SCT_UMAP <- umap(q_SCT_PCA_scores_e)
+```
+
+LOG UMAP:
+
+```{r}
+# Extract umap coordinates for plotting
+q_LOG_UMAP_df <- as.data.frame(q_LOG_UMAP$layout) 
+```
+
+```{r}
+# Reorder to match
+q_LOG_metadata_subset <- q_LOG_metadata_subset[match(rownames(q_LOG_UMAP_df), rownames(q_LOG_metadata_subset)), ]
+```
+
+```{r}
+# Add metadata to the PC scores
+q_LOG_UMAP_df$Cluster <- q_LOG_metadata_subset$Cluster
+colnames(q_LOG_UMAP_df)[1] <- "UMAP1"  
+colnames(q_LOG_UMAP_df)[2] <- "UMAP2"
+```
+
+
+```{r}
+q_LOG_UMAP_df$Cluster <- as.factor(q_LOG_UMAP_df$Cluster)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = q_LOG_UMAP_df$UMAP1,
+  y = q_LOG_UMAP_df$UMAP2,
+  col = colors[q_LOG_UMAP_df$Cluster],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(q_LOG_UMAP_df$Cluster),
+       col = colors[1:nlevels(q_LOG_UMAP_df$Cluster)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+SCT UMAP:
+
+
+```{r}
+# Extract umap coordinates for plotting
+q_SCT_UMAP_df <- as.data.frame(q_SCT_UMAP$layout) 
+```
+
+```{r}
+# Reorder to match
+q_SCT_metadata_subset <- q_SCT_metadata_subset[match(rownames(q_SCT_UMAP_df), rownames(q_SCT_metadata_subset)), ]
+```
+
+```{r}
+# Add metadata to the PC scores
+q_SCT_UMAP_df$Cluster <- q_SCT_metadata_subset$Cluster
+colnames(q_SCT_UMAP_df)[1] <- "UMAP1"  
+colnames(q_SCT_UMAP_df)[2] <- "UMAP2"
+```
+
+
+```{r}
+q_SCT_UMAP_df$Cluster <- as.factor(q_SCT_UMAP_df$Cluster)
+```
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = q_SCT_UMAP_df$UMAP1,
+  y = q_SCT_UMAP_df$UMAP2,
+  col = colors[q_SCT_UMAP_df$Cluster],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(q_SCT_UMAP_df$Cluster),
+       col = colors[1:nlevels(q_SCT_UMAP_df$Cluster)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+### Project scRNA-seq data to the ISS PCA space
+
+```{r}
+q_LOG_PCA_rotation <- as.matrix(q_LOG_PCA$rotation)
+```
+
+```{r}
+q_RPM_sc_projected <- t(q_RPM_sc_matrix) %*% q_LOG_PCA_rotation
+```
+
+
+```{r}
+q_SCT_PCA_rotation <- as.matrix(q_SCT_PCA$rotation)
+```
+
+```{r}
+q_SCT_sc_projected <- t(q_SCT_sc_matrix) %*% q_SCT_PCA_rotation
+```
+
+
+# Project scRNA-seq data in the ISS PCA space onto the ISS UMAP space
+
+## SCTransformed
+
+```{r}
+q_SCT_sc_projected <- q_SCT_sc_projected[,-18:-30] # use as many PCs as for ISS UMAP
+q_SCT_sc_UMAP_projected <- predict(q_SCT_UMAP, q_SCT_sc_projected)
+colnames(q_SCT_sc_UMAP_projected) <- c("UMAP1", "UMAP2")
+```
+
+```{r}
+# Check that rownames match
+all(rownames(q_SCT_sc_UMAP_projected) == barcodes_sc)
+```
+
+```{r}
+# Add annotations to the UMAP df
+q_SCT_sc_UMAP_projected_df <- as.data.frame(q_SCT_sc_UMAP_projected)
+q_SCT_sc_UMAP_projected_df$Annotation <- SCT_sc_p
+```
+
+```{r}
+q_SCT_sc_UMAP_projected_df$Annotation <- as.factor(q_SCT_sc_UMAP_projected_df$Annotation)
+```
+
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = q_SCT_sc_UMAP_projected_df$UMAP1,
+  y = q_SCT_sc_UMAP_projected_df$UMAP2,
+  col = colors[q_SCT_sc_UMAP_projected_df$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(q_SCT_sc_UMAP_projected_df$Annotation),
+       col = colors[1:nlevels(q_SCT_sc_UMAP_projected_df$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+Repeat for RPM normalized
+
+```{r}
+q_RPM_sc_projected <- q_RPM_sc_projected[,-16:-30] # use as many PCs as for ISS UMAP
+q_RPM_sc_UMAP_projected <- predict(q_LOG_UMAP, q_RPM_sc_projected)
+colnames(q_RPM_sc_UMAP_projected) <- c("UMAP1", "UMAP2")
+```
+
+```{r}
+# Check that rownames match
+all(rownames(q_RPM_sc_UMAP_projected) == barcodes_sc)
+```
+
+```{r}
+# Add annotations to the UMAP df
+q_RPM_sc_UMAP_projected_df <- as.data.frame(q_RPM_sc_UMAP_projected)
+q_RPM_sc_UMAP_projected_df$Annotation <- RPM_sc_p
+```
+
+
+```{r}
+q_RPM_sc_UMAP_projected_df$Annotation <- as.factor(q_RPM_sc_UMAP_projected_df$Annotation)
+```
+
+
+```{r}
+par(mar = c(5, 4, 2, 10), xpd = TRUE) # set plot margins
+par(plt = c(0.12, 0.7, 0.2, 0.9)) # also edit plot area
+
+plot(
+  x = q_RPM_sc_UMAP_projected_df$UMAP1,
+  y = q_RPM_sc_UMAP_projected_df$UMAP2,
+  col = colors[q_RPM_sc_UMAP_projected_df$Annotation],
+  pch = 19,
+  cex = 0.5,
+  xlab = "UMAP1",
+  ylab = "UMAP2",
+)
+
+coord <- par("usr") # get plot coordinates
+
+legend(x = coord[2], y = coord[4],
+       legend = levels(q_RPM_sc_UMAP_projected_df$Annotation),
+       col = colors[1:nlevels(q_RPM_sc_UMAP_projected_df$Annotation)], # get nr of clusters to apply right amount of colors
+       pch = 19,
+       title = "Cell Type",
+       cex = 0.8,  # Adjust text size if needed
+       pt.cex = 1,  # Adjust point size in legend if needed
+       xpd = TRUE) # legend outside of the plot bounds
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
